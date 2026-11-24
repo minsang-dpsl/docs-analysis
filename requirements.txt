@@ -1,0 +1,5 @@
+pypdf>=4.0
+PyYAML>=6.0
+requests>=2.31
+pytest>=8.0
+# google-genai>=1.0   # backend=google 또는 icp.backend=google 사용 시

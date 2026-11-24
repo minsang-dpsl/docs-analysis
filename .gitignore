@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *.so
 
@@ -20,4 +21,6 @@ __pycache__/
 # Logs
 *.log
 
-/data
+data/
+output/
+

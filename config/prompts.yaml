@@ -1,0 +1,54 @@
+# 질문 문구 템플릿. 바꾸면 질문 sha가 달라져 기존 쪽별 결과는 자동으로 재사용되지 않습니다.
+none_label: "None of these"
+none_description: "The document does not indicate any of the options above."
+
+naics_question: >-
+  Which {group_title} ({group_code}) industries are this company's CUSTOMERS (buyers, not the
+  seller's own industry; for a component supplier, the direct buyer)? Choose none if the page gives no evidence.
+
+country_question: >-
+  Based on this document page, in which countries does the company sell or export its products
+  or services (target sales markets, distribution, partners, shipments)? Do not choose a country
+  only because it is the headquarters, factory location, or a unit or size notation.
+  Choose "none" if the page gives no evidence.
+
+icp_system: >-
+  You are a B2B sales analyst. Infer the ideal customer profile (ICP) of the company that
+  wrote the attached document pages. Rely on the document text first; the classifier hints are
+  weak signals and may be noisy.
+
+icp_user: |
+  The attached PDF contains only selected pages (original page numbers: {page_list}).
+
+  Rules:
+  - ICP means the DIRECT BUYER of the company's products or services. If the company sells a
+    component or material to manufacturers, the ICP is those manufacturers, not the end users
+    of the final product. Mention end-use industries separately.
+  - Use only what the pages support. If evidence is missing, say so in caveats instead of guessing.
+  - Use NAICS 2022 5-digit codes only from the hints or when you are confident; never invent codes.
+
+  Classifier hints (customer-industry probabilities per page, noisy):
+  {naics_hints}
+
+  Country hints (sales-market probabilities, {country_note}):
+  {country_hints}
+
+  Return ONLY a JSON object with this shape:
+  {{
+    "company_summary": "one or two sentences: what the company sells",
+    "direct_buyer_types": ["..."],
+    "end_use_industries": ["..."],
+    "icp": [
+      {{
+        "segment": "buyer segment name",
+        "naics_codes": ["5-digit codes"],
+        "company_size": "if stated, else null",
+        "buyer_roles": ["..."],
+        "pain_points_solved": ["..."],
+        "evidence_pages": [original page numbers]
+      }}
+    ],
+    "regions": [{{"country_or_region": "...", "evidence_pages": [..], "confidence": "high|medium|low"}}],
+    "confidence": "high|medium|low",
+    "caveats": ["..."]
+  }}
