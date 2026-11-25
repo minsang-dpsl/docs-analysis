@@ -62,17 +62,29 @@ def parse_decision_response(resp: dict) -> tuple[dict[str, dict[str, float]], di
 
 
 # ---------------------------------------------------------------- 텍스트 생성(ICP 단계)
-def build_chat_request(model: str, system: str, user_text: str, pdf_b64: str | None, filename: str = "pages.pdf") -> dict:
+def build_chat_request(
+    model: str, system: str, user_text: str, pdf_b64: str | None, filename: str = "pages.pdf",
+    pdf_engine: str | None = None,
+) -> dict:
+    """pdf_engine 을 주면 OpenRouter 의 PDF 처리 엔진을 고정합니다(file-parser 플러그인).
+
+    "native" 는 모델이 PDF 를 직접 읽습니다(입력 토큰으로 과금). 지정하지 않으면 모델이 네이티브를 지원하지
+    않을 때 OpenRouter 가 조용히 mistral-ocr($2/1,000쪽)로 바꾸므로, B안처럼 "모델이 PDF 를 읽는다"를
+    보장해야 할 때는 "native" 로 고정하세요(지원하지 않는 모델이면 400 으로 실패).
+    """
     content: list[dict] = [{"type": "text", "text": user_text}]
     if pdf_b64:
         content.append(
             {"type": "file", "file": {"filename": filename, "file_data": f"data:application/pdf;base64,{pdf_b64}"}}
         )
-    return {
+    body = {
         "model": model,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
         "temperature": 0.2,
     }
+    if pdf_b64 and pdf_engine:
+        body["plugins"] = [{"id": "file-parser", "pdf": {"engine": pdf_engine}}]
+    return body
 
 
 def parse_chat_response(resp: dict) -> tuple[str, dict]:
@@ -86,5 +98,6 @@ def parse_chat_response(resp: dict) -> tuple[str, dict]:
     usage = {
         "prompt_tokens": int(u.get("prompt_tokens", 0) or 0),
         "completion_tokens": int(u.get("completion_tokens", 0) or 0),
+        "cost": float(u["cost"]) if u.get("cost") is not None else None,  # OpenRouter 가 청구액을 주는 경우
     }
     return text or "", usage

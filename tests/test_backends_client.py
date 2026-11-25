@@ -145,3 +145,34 @@ def test_google_decide_not_implemented():
     c = client.DecisionClient(dict(SETTINGS, backend="google"))
     with pytest.raises(NotImplementedError):
         c.decide("QUJD", "p.pdf", QS)
+
+
+def test_chat_request_pins_pdf_engine_only_when_pdf_attached():
+    with_pdf = backends.build_chat_request("m", "sys", "user", "QUJD", pdf_engine="native")
+    assert with_pdf["plugins"] == [{"id": "file-parser", "pdf": {"engine": "native"}}]
+    assert with_pdf["messages"][1]["content"][1]["file"]["file_data"].endswith("QUJD")
+    assert "plugins" not in backends.build_chat_request("m", "sys", "user", None, pdf_engine="native")  # A안(PDF 없음)
+    assert "plugins" not in backends.build_chat_request("m", "sys", "user", "QUJD")  # 엔진 미지정이면 OpenRouter 기본
+
+
+def test_chat_response_keeps_cost_when_provided():
+    resp = {"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": 3, "completion_tokens": 2, "cost": 0.0004}}
+    assert backends.parse_chat_response(resp) == ("hi", {"prompt_tokens": 3, "completion_tokens": 2, "cost": 0.0004})
+    assert backends.parse_chat_response({"choices": [{"message": {"content": "hi"}}]})[1]["cost"] is None
+
+
+def test_generate_sends_pinned_engine_from_settings(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    sent = {}
+
+    class Sess:
+        def post(self, url, json=None, **k):
+            sent.update(url=url, body=json)
+            return Resp(200, {"choices": [{"message": {"content": "{}"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+
+    settings = dict(SETTINGS, icp={"backend": "openrouter", "model": "m", "pdf_engine": "native"})
+    c = client.DecisionClient(settings, session=Sess(), sleep=lambda s: None)
+    c.generate("sys", "user", "QUJD")
+    assert sent["url"] == "http://x" and sent["body"]["plugins"][0]["pdf"]["engine"] == "native"
+    c.generate("sys", "user", None)
+    assert "plugins" not in sent["body"]

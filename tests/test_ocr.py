@@ -101,7 +101,7 @@ def test_extract_splits_into_per_page_requests_over_limit():
 # ---------------------------------------------------------------- CLI
 @pytest.fixture
 def result_csv(tmp_path):
-    base = tmp_path / "gemini-decision-1" / STEM
+    base = tmp_path / STEM
     base.mkdir(parents=True)
     (base / "__result.csv").write_text(
         "kind,code,name,score,evidence_page\n"

@@ -10,8 +10,6 @@ openrouter:
 google:
   model: gemini-decision-1             # [PLACEHOLDER]
 
-output_dir_name: gemini-decision-1     # output/<이 이름>/<PDF명>/ 아래에 저장
-
 concurrency: 2
 timeout_s: 180
 retry:
@@ -23,7 +21,7 @@ retry:
 thresholds:
   naics_min: 0.3            # 코드별 쪽 최댓값이 이 값 이상이면 후보
   country_relative: 0.25    # 쪽 내 국가 1순위 대비 비율
-  country_min_abs: 0.05     # 국가 절대 하한
+  country_min_abs: 0.1      # 국가/지역 절대 하한 (쪽 안에서 이 값 미만이면 1순위 대비 비율과 무관하게 제외)
 
 # 데이터 파일과 기대 개수(불일치 시 CountMismatch, --allow-count-mismatch로 우회)
 data:
@@ -80,8 +78,8 @@ ocr:
 # ICP 추출 단계
 icp:
   backend: openrouter
-  model: google/gemini-2.5-pro         # [PLACEHOLDER] 텍스트 생성 모델 ID
-  naics_hint_top: 10
-  naics_hint_min: 0.5
-  naics_hint_fallback_top: 5
-  country_weak_below: 0.4
+  model: anthropic/claude-haiku-5.5    # OpenRouter 모델 목록에서 확인(입력 text/image/file, 컨텍스트 1M)
+  pdf_engine: native                   # B안: 모델이 PDF 를 직접 읽도록 고정(미지정 시 OpenRouter 가 mistral-ocr 로 바꿀 수 있음)
+  pricing:                             # OpenRouter 모델 목록 기준(USD/1M 토큰). 응답에 usage.cost 가 있으면 그것을 우선
+    input_per_mtok: 0.10
+    output_per_mtok: 0.50

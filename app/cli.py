@@ -12,9 +12,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import aggregate, config, data, ocr as ocr_mod, pdf, questions as Q
+from . import aggregate, compare as compare_mod, config, data, ocr as ocr_mod, pdf, questions as Q
 from .client import ApiError, DecisionClient
-from .icp import run_icp
+from .icp import MODES, IcpInputError, run_icp
 from .select_pages import select_pages
 
 
@@ -260,17 +260,62 @@ def cmd_select(args) -> int:
 
 
 def cmd_icp(args) -> int:
+    """A안(OCR 텍스트 + NAICS 후보) 또는 B안(PDF 통째로)으로 ICP 생성. --mode both 는 둘 다."""
     settings = config.load_settings()
     prompts = config.load_prompts()
     pdf_path = Path(args.pdf)
-    result, out = _load_result(args, settings, pdf_path)
+    out = config.output_dir(settings, pdf_path, Path(args.out) if getattr(args, "out", None) else None)
     client = DecisionClient(settings)
-    res = run_icp(pdf_path, result, settings, prompts, client, out)
-    print(f"사용한 쪽: {res['selected_pages']}")
-    if res["parse_error"]:
-        print(f"[경고] JSON 파싱 실패: {res['parse_error']} (__icp.json 의 raw_text 확인)", file=sys.stderr)
+    rc = 0
+    for mode in (list(MODES) if args.mode == "both" else [args.mode]):
+        label = "A안" if mode == "a" else "B안"
+        rec = run_icp(pdf_path, mode, settings, prompts, client, out,
+                      result_csv=Path(args.result) if getattr(args, "result", None) else None,
+                      ocr_path=Path(args.ocr) if getattr(args, "ocr", None) else None)
+        i = rec["input"]
+        if mode == "a":
+            pages = ", ".join(str(p) for p in i["ocr_pages"])
+            print(f"[입력] {label}: NAICS 후보 {i['naics_candidates']}개, OCR 텍스트 {i['ocr_chars']:,}자 (쪽 {pages})")
+        else:
+            print(f"[입력] {label}: PDF 통째로 ({i['total_pages']}쪽, {i['pdf_bytes']:,} 바이트)")
+        u, cost = rec["usage"], rec["cost_usd"]
+        cost_txt = "계산 불가" if cost is None else f"${cost:.4f} ({rec['cost_source']})"
+        print(f"[실제] {label} 소요 {rec['latency_s']}s | 토큰 입력 {u['prompt_tokens']:,} / 출력 {u['completion_tokens']:,} | 비용 {cost_txt}")
+        if rec["parse_error"]:
+            print(f"[경고] {label} JSON 파싱 실패: {rec['parse_error']} (__icp_{mode}.json 의 raw_text 확인)", file=sys.stderr)
+            rc = 1
+            continue
+        for w in rec["schema_warnings"]:
+            print(f"[경고] {label} {w}", file=sys.stderr)
+        print(f"  항목 수: " + ", ".join(f"{f} {len(rec['icp'].get(f) or [])}" for f in compare_mod.FIELDS))
+        print(f"결과: {out}/__icp_{mode}.json")
+    return rc
+
+
+def cmd_compare(args) -> int:
+    """__icp_a.json 과 __icp_b.json 을 비교해 __compare.json, __compare.md 를 만듭니다."""
+    settings = config.load_settings()
+    pdf_path = Path(args.pdf)
+    out = config.output_dir(settings, pdf_path, Path(args.out) if getattr(args, "out", None) else None)
+    recs = {}
+    for m in MODES:
+        p = out / f"__icp_{m}.json"
+        if not p.exists():
+            raise SystemExit(f"{p.name} 이(가) 없습니다: {p} (먼저 python -m app icp <pdf> --mode {m} 를 실행하세요)")
+        recs[m] = json.loads(p.read_text(encoding="utf-8"))
+    try:
+        cmp = compare_mod.compare(recs["a"], recs["b"], args.threshold)
+    except ValueError as e:
+        print(f"[오류] {e}", file=sys.stderr)
         return 1
-    print(json.dumps(res["icp"], ensure_ascii=False, indent=2))
+    write_json_atomic(out / "__compare.json", cmp)
+    (out / "__compare.md").write_text(compare_mod.render_markdown(cmp), encoding="utf-8")
+    print(f"{'필드':<13}{'A':>4}{'B':>4}{'일치':>5}{'유사':>5}{'A만':>5}{'B만':>5}{'겹침률':>7}")
+    for f, v in cmp["fields"].items():
+        print(f"{f:<13}{v['n_a']:>4}{v['n_b']:>4}{v['exact']:>5}{v['similar']:>5}{len(v['only_a']):>5}{len(v['only_b']):>5}{v['overlap']:>7.0%}")
+    s = cmp["summary"]
+    print(f"전체: A {s['items_a']}개, B {s['items_b']}개, 짝지어진 항목 {s['matched']}개, 겹침률 {s['overlap']:.0%}")
+    print(f"결과: {out}/__compare.md (나란히 보기), {out}/__compare.json")
     return 0
 
 
@@ -315,7 +360,7 @@ def cmd_ocr(args) -> int:
         "selected": [{"rank": i, "page": p, "naics_count": stats[p]["n"], "score_sum": stats[p]["sum"],
                       "naics_codes": stats[p]["codes"]} for i, p in enumerate(pages, 1)],
         "ocr": {"requests": n_requests, "pages_sent": len(pages), "chars": sum(chars.values()),
-                "latency_s": round(elapsed, 2)},
+                "latency_s": round(elapsed, 2), "cost_usd_est": round(len(pages) / 1000 * price, 6)},  # 단가 미확정 추정치
         "pages": {str(p): texts[p] for p in sorted(pages)},
     }
     write_json_atomic(out / "__ocr.json", rec)
@@ -326,6 +371,123 @@ def cmd_ocr(args) -> int:
     if empty:
         print(f"[경고] 텍스트가 비어 있는 쪽: {empty}", file=sys.stderr)
     print(f"완료, 결과: {out}/__ocr.txt (메타데이터: {out}/__ocr.json)")
+    return 0
+
+
+# ---------------------------------------------------------------- pipeline
+def _run_log_cost(log_path: Path, offset: int) -> float:
+    """offset 이후에 추가된 __run_log.jsonl 의 ok 호출 비용 합계(재사용 쪽은 0)."""
+    if not log_path.exists():
+        return 0.0
+    with open(log_path, "rb") as f:
+        f.seek(offset)
+        lines = f.read().decode("utf-8", errors="replace").splitlines()
+    total = 0.0
+    for ln in lines:
+        try:
+            d = json.loads(ln)
+        except ValueError:
+            continue
+        if d.get("status") == "ok" and d.get("cost_usd") is not None:
+            total += float(d["cost_usd"])
+    return total
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def cmd_pipeline(args) -> int:
+    """run -> ocr -> icp 를 한 번에 실행합니다. 앞 단계가 실패하면 즉시 중단(뒤 단계 비용 방지)."""
+    settings = config.load_settings()
+    pdf_path = Path(args.pdf)
+    out = config.output_dir(settings, pdf_path, Path(args.out) if getattr(args, "out", None) else None)
+    base = dict(vars(args))
+    base.setdefault("pages", None)
+    modes = list(MODES) if args.mode == "both" else [args.mode]
+    steps: list[tuple[str, float, float | None, str]] = []  # (이름, 소요 s, 비용 USD, 비용 표기)
+
+    def fail(name: str, rc: int) -> int:
+        print(f"[중단] {name} 단계가 실패했습니다(코드 {rc}). 뒤 단계는 실행하지 않았습니다.", file=sys.stderr)
+        return rc if rc else 1
+
+    if "a" in modes:
+        run_args = argparse.Namespace(**{**base, "pages": getattr(args, "pages", None), "concurrency": None})
+        ocr_args = argparse.Namespace(**{**base, "result": None, "top": args.top})
+        if args.dry_run:
+            print("=== [1/3] run (dry-run) ===")
+            rc = cmd_run(run_args)
+            if rc:
+                return fail("run", rc)
+            print("=== [2/3] ocr (dry-run) ===")
+            if (out / "__result.csv").exists():
+                rc = cmd_ocr(ocr_args)
+                if rc:
+                    return fail("ocr", rc)
+            else:
+                top = args.top or int(settings["ocr"]["top_pages"])
+                price = float(settings["ocr"]["price_per_1000_pages"])
+                print(f"[dry-run] __result.csv 가 아직 없어 선택은 못 합니다. 최대 {top}쪽, "
+                      f"비용 약 ${top / 1000 * price:.4f} 이하(단가 ${price}/1,000쪽, 미확정)")
+            print("=== [3/3] icp ===")
+            print("[dry-run] LLM 을 호출하지 않았습니다. 모델/입력은 icp 실행 시 출력됩니다.")
+            return 0
+
+        log_path = out / "__run_log.jsonl"
+        offset = log_path.stat().st_size if log_path.exists() else 0
+        print("=== [1/3] run: 쪽별 NAICS·국가 판별 ===")
+        t0 = time.monotonic()
+        rc = cmd_run(run_args)
+        run_t = time.monotonic() - t0
+        steps.append(("run", run_t, _run_log_cost(log_path, offset), "새 호출분 usage.cost 합계"))
+        if rc:
+            print("[안내] 실패한 쪽은 --resume 을 붙여 다시 실행하면 성공한 쪽은 재사용합니다.", file=sys.stderr)
+            return fail("run", rc)
+        blocked = _read_json(out / "__result.json").get("pages_blocked") or []
+        if blocked:
+            print(f"[경고] 안전 필터로 차단된 쪽: {blocked} (결과에서 제외됨, 계속 진행)", file=sys.stderr)
+
+        print("=== [2/3] ocr: 상위 쪽 텍스트 추출 ===")
+        t0 = time.monotonic()
+        rc = cmd_ocr(ocr_args)
+        ocr_t = time.monotonic() - t0
+        ocr_cost = (_read_json(out / "__ocr.json").get("ocr") or {}).get("cost_usd_est")
+        steps.append(("ocr", ocr_t, ocr_cost, "추정(단가 미확정)"))
+        if rc:
+            return fail("ocr", rc)
+
+    for mode in modes:
+        label = "A안" if mode == "a" else "B안"
+        print(f"=== [{'3/3' if mode == 'a' else 'B'}] icp: {label} ===")
+        icp_args = argparse.Namespace(**{**base, "mode": mode, "result": None, "ocr": None})
+        t0 = time.monotonic()
+        rc = cmd_icp(icp_args)
+        el = time.monotonic() - t0
+        rec = _read_json(out / f"__icp_{mode}.json")
+        steps.append((f"icp {label}", el, rec.get("cost_usd"), rec.get("cost_source") or "계산 불가"))
+        if rc:
+            return fail(f"icp {label}", rc)
+
+    print("=== 요약 ===")
+    print(f"{'단계':<10}{'소요(s)':>9}{'비용(USD)':>12}  비고")
+    total_t, total_c, unknown = 0.0, 0.0, False
+    for name, t, c, note in steps:
+        total_t += t
+        if c is None:
+            unknown = True
+        else:
+            total_c += c
+        print(f"{name:<10}{t:>9.1f}{('계산불가' if c is None else f'${c:.4f}'):>12}  {note}")
+    a_steps = [s for s in steps if s[0] in ("run", "ocr") or s[0] == "icp A안"]
+    if "a" in modes and len(modes) > 1:
+        ta = sum(s[1] for s in a_steps)
+        ca = sum(s[2] or 0.0 for s in a_steps)
+        print(f"{'A안 합계':<10}{ta:>9.1f}{f'${ca:.4f}':>12}  run + ocr + icp A안")
+    print(f"{'전체 합계':<10}{total_t:>9.1f}{f'${total_c:.4f}':>12}  {'일부 비용 계산 불가로 과소 합산' if unknown else ''}")
+    print(f"결과 폴더: {out}")
     return 0
 
 
@@ -357,10 +519,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--result", help="__result.json 경로(기본: 출력 폴더)")
     s.set_defaults(fn=cmd_select)
 
-    i = sub.add_parser("icp", help="선택한 페이지로 ICP 추출")
+    i = sub.add_parser("icp", help="ICP 생성: a=OCR 텍스트+NAICS 후보(run, ocr 먼저), b=PDF 통째로, both=둘 다")
     common(i)
-    i.add_argument("--result")
+    i.add_argument("--mode", required=True, choices=[*MODES, "both"])
+    i.add_argument("--result", help="A안: __result.csv 경로(기본: 출력 폴더)")
+    i.add_argument("--ocr", help="A안: __ocr.txt 경로(기본: 출력 폴더)")
     i.set_defaults(fn=cmd_icp)
+
+    c = sub.add_parser("compare", help="A안(__icp_a.json)과 B안(__icp_b.json) ICP 비교")
+    c.add_argument("pdf")
+    c.add_argument("--out", help="출력 기준 디렉터리(기본 output/)")
+    c.add_argument("--threshold", type=float, default=0.6, help="유사 항목 판정 기준(토큰 Jaccard, 기본 0.6)")
+    c.set_defaults(fn=cmd_compare)
 
     o = sub.add_parser("ocr", help="결과 CSV 의 NAICS 가 많이 몰린 쪽 상위 N개만 Document AI 로 텍스트 추출")
     common(o)
@@ -368,6 +538,14 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--top", type=int, help="사용할 쪽 수(기본 settings.ocr.top_pages)")
     o.add_argument("--dry-run", action="store_true", help="Document AI 호출 없이 선택된 쪽과 예상 비용만 출력")
     o.set_defaults(fn=cmd_ocr)
+
+    pl = sub.add_parser("pipeline", help="run -> ocr -> icp 를 한 번에(기본 A안, --mode both 면 B안도 실행)")
+    common(pl, pages=True)
+    pl.add_argument("--mode", choices=[*MODES, "both"], default="a", help="a(기본)=run+ocr+icp A안, b=PDF 통째로만, both=A안 후 B안")
+    pl.add_argument("--resume", action="store_true", help="run 단계에서 기존 쪽 결과 재사용")
+    pl.add_argument("--dry-run", action="store_true", help="API 호출 없이 run/ocr 의 예상만 출력")
+    pl.add_argument("--top", type=int, help="OCR 에 사용할 쪽 수(기본 settings.ocr.top_pages)")
+    pl.set_defaults(fn=cmd_pipeline)
     return ap
 
 
@@ -375,7 +553,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.fn(args)
-    except (data.CountMismatch, Q.QuestionError, ocr_mod.OcrError, RuntimeError) as e:  # RuntimeError: 환경 변수/키 누락
+    except (data.CountMismatch, Q.QuestionError, ocr_mod.OcrError, IcpInputError, RuntimeError) as e:  # RuntimeError: 환경 변수/키 누락
         print(f"[오류] {e}", file=sys.stderr)
         return 2
 

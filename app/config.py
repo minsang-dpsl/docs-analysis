@@ -46,7 +46,7 @@ def data_path(settings: dict, key: str) -> Path:
 
 def output_dir(settings: dict, pdf_path: Path, base: Path | None = None) -> Path:
     base = base or (ROOT / "output")
-    return base / settings["output_dir_name"] / pdf_path.stem
+    return base / pdf_path.stem
 
 
 def api_key(env_name: str) -> str:

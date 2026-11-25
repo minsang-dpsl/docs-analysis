@@ -116,7 +116,10 @@ class DecisionClient:
         model = model or self.s["icp"]["model"]
         t0 = time.monotonic()
         if backend == "openrouter":
-            resp = self._post_openrouter(backends.build_chat_request(model, system, user_text, pdf_b64))
+            body = backends.build_chat_request(
+                model, system, user_text, pdf_b64, pdf_engine=self.s.get("icp", {}).get("pdf_engine")
+            )
+            resp = self._post_openrouter(body)
             text, usage = backends.parse_chat_response(resp)
         elif backend == "google":
             text, usage = self._generate_google(model, system, user_text, pdf_b64)
