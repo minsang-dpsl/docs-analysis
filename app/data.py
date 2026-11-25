@@ -95,7 +95,7 @@ def load_naics_ko(path: str | Path | None, naics: Naics) -> None:
     """선택 파일 naics_ko.csv (code,title_ko). 없으면 무시."""
     if not path or not Path(path).exists():
         return
-    with open(path, encoding="utf-8", newline="") as f:
+    with open(path, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             code = (row.get("code") or "").strip()
             ko = (row.get("title_ko") or "").strip()
@@ -129,14 +129,39 @@ class Country:
     alpha2: str
     name_en: str
     name_ko: str
+    region: str = ""  # prompts.yaml continent_options 의 id. 여러 지역에 걸치면 ';' 로 구분(첫 번째가 우선)
+
+    @property
+    def regions(self) -> list[str]:
+        return [r.strip() for r in self.region.split(";") if r.strip()]
 
 
 def load_countries(path: str | Path) -> list[Country]:
-    with open(path, encoding="utf-8", newline="") as f:
+    with open(path, encoding="utf-8-sig", newline="") as f:  # BOM 이 있어도 없어도 읽음
         return [
-            Country(r["alpha2"].strip().upper(), r["name_en"].strip(), (r.get("name_ko") or "").strip())
+            Country(
+                r["alpha2"].strip().upper(), r["name_en"].strip(), (r.get("name_ko") or "").strip(),
+                (r.get("region") or "").strip(),
+            )
             for r in csv.DictReader(f)
         ]
+
+
+def validate_regions(countries: list[Country], region_ids: list[str], allow_mismatch: bool = False) -> list[str]:
+    """모든 국가가 정의된 지역 하나에 속하는지 확인합니다. region_ids 가 비어 있으면(대륙 질문 없음) 건너뜁니다."""
+    if not region_ids:
+        return []
+    ids = set(region_ids)
+    bad = [c.alpha2 for c in countries if not c.regions or not set(c.regions) <= ids]
+    empty = sorted(ids - {r for c in countries for r in c.regions})
+    problems = []
+    if bad:
+        problems.append(f"지역이 없거나 정의되지 않은 국가 {len(bad)}개: {bad[:10]}")
+    if empty:
+        problems.append(f"소속 국가가 없는 지역: {empty}")
+    if problems and not allow_mismatch:
+        raise CountMismatch("; ".join(problems))
+    return problems
 
 
 # ---------------------------------------------------------------- 검증

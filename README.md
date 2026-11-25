@@ -10,7 +10,7 @@
 ## 흐름
 
 ```
-PDF → 1쪽씩 분할 → (NAICS 4자리 그룹별 질문 308개 + 국가 질문 1개)를 한 호출에 전송
+PDF → 1쪽씩 분할 → (NAICS 4자리 그룹별 질문 308개 + 국가 1개 + 대륙 1개)를 한 호출에 전송
     → 쪽별 확률(__pages/{n}.json) → 문서 집계(__result.json/csv)
     → select: ICP 입력 페이지 선택 → icp: 선택한 페이지 원문 + 힌트로 ICP JSON 생성
 ```
@@ -21,16 +21,21 @@ PDF → 1쪽씩 분할 → (NAICS 4자리 그룹별 질문 308개 + 국가 질�
 pip install -r requirements.txt
 cp .env.example .env          # OPENROUTER_API_KEY 입력 (.env 는 커밋 금지)
 
-python -m app estimate samples/BIOCERA_Company_Introduction.pdf          # API 호출 없이 토큰/비용 추정
-python -m app run samples/BIOCERA_Company_Introduction.pdf --dry-run     # 요청 규모만 확인
-python -m app run samples/BIOCERA_Company_Introduction.pdf --resume --concurrency 2
-python -m app select samples/BIOCERA_Company_Introduction.pdf            # ICP 입력 페이지 선택
-python -m app icp samples/BIOCERA_Company_Introduction.pdf               # ICP 추출
+python -m app estimate "samples/pdf/기업소개/BIOCERA_Company Introduction.pdf"          # API 호출 없이 토큰/비용 추정
+python -m app run "samples/pdf/기업소개/BIOCERA_Company Introduction.pdf" --dry-run     # 요청 규모만 확인
+python -m app run "samples/pdf/기업소개/BIOCERA_Company Introduction.pdf" --resume --concurrency 2
+python -m app select "samples/pdf/기업소개/BIOCERA_Company Introduction.pdf"            # ICP 입력 페이지 선택
+python -m app icp "samples/pdf/기업소개/BIOCERA_Company Introduction.pdf"               # ICP 추출
 python -m pytest -q
 ```
 
 결과는 `output/<output_dir_name>/<PDF명>/` 아래에 저장됩니다
 (`pages/{n}.json`, `__result.json`, `__result.csv`, `__run_log.jsonl`, `__pages_selected.json`, `__icp.json`).
+`__result.csv`는 `kind,code,name,score,evidence_page` 열이며 순서는 NAICS(`naics`), 국가(`country`), 지역(`continent`) 순입니다.
+각 `continent` 행 바로 아래에 그 지역에 속한 국가가 전부 `continent_country` 행으로 나오고, 개별 국가로도 집계된 국가는 점수가 앞쪽에 채워집니다(나머지는 점수 빈칸).
+지역은 대륙을 동서남북으로 나눈 15개(`config/prompts.yaml`의 `continent_options`)이고, 국가의 소속은 `data/countries.csv`의 `region` 열입니다(초안, 검수 필요).
+러시아처럼 여러 지역에 걸친 국가는 `region` 열에 `;`로 모두 적고(첫 번째가 우선), 결과에는 점수가 가장 높은 지역 아래에 한 번만 나옵니다.
+`countries.csv`와 `__result.csv`는 엑셀에서 한글이 깨지지 않도록 BOM 포함 UTF-8이며, 읽을 때는 BOM 유무와 상관없이 처리합니다.
 `--resume`은 PDF sha256과 질문 sha가 모두 같은 쪽 결과만 재사용하므로, 프롬프트나 Index 설정을 바꾸면 자동 무효화됩니다.
 
 ## 모듈
@@ -39,7 +44,7 @@ python -m pytest -q
 |---|---|
 | `app/data.py` | xlsx(표준 라이브러리만), NAICS 개수 검증(308/689/195, 불일치 시 `CountMismatch`), Index File, 국가 CSV |
 | `app/questions.py` | 질문 생성, none 강제, 질문/옵션 수·ID 규칙 사전 검증, 질문 sha, Index 설명 상한 |
-| `app/backends.py` | **요청 JSON 빌더와 응답 파서(추정 형식)**. 실제 API 사양이 다르면 이 파일만 수정 |
+| `app/backends.py` | Decisions 요청 빌더와 응답 파서(OpenRouter 공개 문서 기준, alpha). 사양이 바뀌면 이 파일만 수정 |
 | `app/client.py` | 429/408/409/5xx·네트워크 오류만 지수 백오프 재시도, 안전 필터 400은 blocked, 에러 메시지에서 PDF 내용 제거 |
 | `app/aggregate.py` | 쪽 요약(none 제외), 문서 집계(NAICS 쪽 최댓값 ≥ 0.3, 국가 상대 25% + 절대 0.05 후 쪽 간 최댓값) |
 | `app/select_pages.py` | ICP 입력 페이지 선택 규칙 |
@@ -60,17 +65,17 @@ Cheongcho [1,2,3,6,9,10,11,12,13](14쪽 중 9쪽, 신호가 흩어진 문서라 
 
 ## 확인이 필요한 가정 (원본에서 복원하지 못한 부분)
 
-1. **Decisions API 요청/응답 형식**: `app/backends.py`의 `ASSUMED` 표시. 실제 형식으로 교체 필요. `backend: google`의 decisions 호출은 미구현(`NotImplementedError`).
-2. **모델 ID**: `settings.yaml`의 `openrouter.model`, `icp.model`은 placeholder.
-3. **API 제약값**(`limits`: 질문 수, 옵션 수, ID 규칙)과 **단가**(`pricing`)는 placeholder.
+1. **Decisions API 형식**: OpenRouter 공개 문서(`POST /api/alpha/decisions`, `state`에 file 파트, `questions`는 질문 ID 키 객체, 응답은 `answers[id].probabilities`)에 맞췄으나 **실호출 미검증**이고 alpha라 바뀔 수 있음. `backend: google`의 decisions 호출은 미구현(`NotImplementedError`).
+2. **모델 ID**: `openrouter.model`(google/gemini-decision-1)은 실존 확인됨. `icp.model`은 placeholder.
+3. **API 제약값**(`limits`: 질문 수, 옵션 수, ID 규칙)은 placeholder. **단가**(`pricing`, 입력 $0.10/1M, 출력 0)는 Google AI Studio 문서 기준이며 실제 청구액은 응답의 `usage.cost`를 씁니다.
 4. **프롬프트 문구**(`config/prompts.yaml`)는 새로 작성. 원본 문구와 다름.
 5. **국가 한글명**(`data/countries.csv`)은 기억 기반이라 검수 필요. 195개국 = UN 193 + 바티칸 + 팔레스타인.
 6. 원본의 `src/test_decisions_verN.py`(OCR 게이트 실험)와 기존 `output/` 쪽별 JSON은 복원되지 않음.
 
 ## 비용 주의
 
-질문 309개(옵션 합계 약 900개)를 쪽마다 보내므로 입력이 큽니다. `estimate` 기준 쪽당 입력 약 77k 토큰이며,
-Index 설명(`index.max_chars: 160`, `max_terms: 6`)이 그중 약 26k 토큰을 차지합니다. `index.enabled: false`로 끄거나 상한을 낮추세요.
+질문 310개(옵션 합계 약 900개)를 쪽마다 보내므로 입력이 큽니다. `estimate` 기준 쪽당 입력 약 58k 토큰입니다(글자 수/3.5 추정이라 한국어 지시문은 실제 토큰이 더 많을 수 있음).
+Index 설명(`index.max_chars: 160`, `max_terms: 6`)이 큰 비중을 차지합니다. `index.enabled: false`로 끄거나 상한을 낮추세요.
 Index 설명은 문서를 모르는 상태에서 짧은 용어를 우선 고르므로, 정수기처럼 특정 용어가 중요하면
 `index.priority_terms: ["water purification"]` 처럼 키워드를 추가하세요(33331에서 정수기 용어가 먼저 채워짐).
 

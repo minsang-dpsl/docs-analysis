@@ -6,7 +6,7 @@ import io
 
 from app import pdf
 
-SAMPLE = Path(__file__).parent.parent / "samples" / "Hasung_Electronics_Company_introduction.pdf"
+SAMPLE = Path(__file__).parent.parent / "samples" / "pdf" / "텍스트기반" / "[Hasung Electronics] Company introduction.pdf"
 
 
 def test_parse_pages():

@@ -1,16 +1,41 @@
 # 질문 문구 템플릿. 바꾸면 질문 sha가 달라져 기존 쪽별 결과는 자동으로 재사용되지 않습니다.
-none_label: "None of these"
-none_description: "The document does not indicate any of the options above."
+none_naics: "이 그룹에 해당 없음"
+none_country: "어느 국가도 언급되지 않았거나 판단할 수 없다."
+none_continent: "어느 지역도 언급되지 않았거나 판단할 수 없다."
 
 naics_question: >-
-  Which {group_title} ({group_code}) industries are this company's CUSTOMERS (buyers, not the
-  seller's own industry; for a component supplier, the direct buyer)? Choose none if the page gives no evidence.
+  이 페이지를 쓴 회사의 고객(구매자) 업종은 {group_title}({group_code}) 중 어디에 해당하는가?
+  판매자 자신의 업종이 아니라 고객 업종 기준이며, 부품·소재 공급사라면 직접 구매자의 업종이다.
+  이 페이지에 근거가 없으면 none을 고른다.
 
 country_question: >-
-  Based on this document page, in which countries does the company sell or export its products
-  or services (target sales markets, distribution, partners, shipments)? Do not choose a country
-  only because it is the headquarters, factory location, or a unit or size notation.
-  Choose "none" if the page gives no evidence.
+  이 페이지에서 회사가 제품이나 서비스를 판매하거나 수출하는 국가는 어디인가
+  (목표 판매 시장, 유통, 파트너, 선적 기준)? 본사나 공장 소재지이거나 단위·사이즈 표기(예: KR 8-20)라는
+  이유만으로 국가를 고르지 않는다. 이 페이지에 근거가 없으면 none을 고른다.
+
+continent_question: >-
+  이 페이지에서 회사가 제품이나 서비스를 판매하거나 수출하는 지역(대륙)은 어디인가
+  (목표 판매 시장, 유통, 파트너, 선적 기준)? 본사나 공장 소재지라는 이유만으로 고르지 않는다.
+  이 페이지에 근거가 없으면 none을 고른다.
+
+# 대륙(지역) 질문 옵션: 큰 대륙을 동서남북으로 나눈 지역 [초안: 원본 목록은 소실됨]
+# 각 국가의 소속 지역은 data/countries.csv 의 region 열(이 id 와 일치해야 함)에서 정합니다.
+continent_options:
+  - {id: east_asia, label: "동아시아 (East Asia: 중국, 일본, 한국, 북한, 몽골)"}
+  - {id: southeast_asia, label: "동남아시아 (Southeast Asia)"}
+  - {id: south_asia, label: "남아시아 (South Asia: 인도, 파키스탄 등)"}
+  - {id: central_asia, label: "중앙아시아·코카서스 (Central Asia and Caucasus)"}
+  - {id: middle_east, label: "중동 (Middle East: 사우디, UAE, 이란, 이스라엘, 튀르키예 등)"}
+  - {id: western_europe, label: "서유럽 (Western Europe: 영국, 독일, 프랑스 등)"}
+  - {id: northern_europe, label: "북유럽 (Northern Europe)"}
+  - {id: eastern_europe, label: "동유럽 (Eastern Europe, 러시아 포함)"}
+  - {id: southern_europe, label: "남유럽 (Southern Europe, 발칸 포함)"}
+  - {id: north_africa, label: "북아프리카 (North Africa, 이집트 포함)"}
+  - {id: sub_saharan_africa, label: "사하라 이남 아프리카 (Sub-Saharan Africa)"}
+  - {id: north_america, label: "북미 (North America: 미국, 캐나다, 멕시코)"}
+  - {id: central_america_caribbean, label: "중미·카리브 (Central America and Caribbean)"}
+  - {id: south_america, label: "남미 (South America)"}
+  - {id: oceania, label: "오세아니아 (Oceania)"}
 
 icp_system: >-
   You are a B2B sales analyst. Infer the ideal customer profile (ICP) of the company that

@@ -57,8 +57,8 @@ class DecisionClient:
         self.timeout = float(settings.get("timeout_s", 180))
 
     # ------------------------------------------------------------ 공통
-    def _post_openrouter(self, body: dict) -> dict:
-        url = self.s["openrouter"]["base_url"]
+    def _post_openrouter(self, body: dict, url: str | None = None) -> dict:
+        url = url or self.s["openrouter"]["base_url"]  # 기본은 chat/completions(ICP 단계)
         headers = {"Authorization": f"Bearer {api_key('OPENROUTER_API_KEY')}", "Content-Type": "application/json"}
 
         def call() -> dict:
@@ -98,12 +98,14 @@ class DecisionClient:
             )
         body = backends.build_decision_request(self.s["openrouter"]["model"], page_b64, filename, questions)
         t0 = time.monotonic()
-        resp = self._post_openrouter(body)
+        resp = self._post_openrouter(body, self.s["openrouter"]["decisions_url"])
         latency = time.monotonic() - t0
         try:
             probs, usage = backends.parse_decision_response(resp)
         except backends.ResponseFormatError as e:
             raise ApiError(f"응답 형식 오류: {e}", None, retryable=False) from e
+        if not probs and usage["refused"]:  # 모든 질문을 거절 -> 안전 필터와 같은 blocked 로 취급
+            raise ApiError("모든 질문에 대해 모델이 답변을 거절했습니다", None, retryable=False, blocked=True)
         return probs, usage, latency
 
     # ------------------------------------------------------------ 텍스트 생성

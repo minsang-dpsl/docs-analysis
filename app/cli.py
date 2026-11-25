@@ -42,6 +42,10 @@ class Context:
         problems = data.validate_counts(
             self.naics, self.countries, s["data"]["expected"], getattr(args, "allow_count_mismatch", False)
         )
+        problems += data.validate_regions(
+            self.countries, [r["id"] for r in self.prompts.get("continent_options", [])],
+            getattr(args, "allow_count_mismatch", False),
+        )
         for pr in problems:
             print(f"[경고] 개수 불일치 무시: {pr}", file=sys.stderr)
         idx_path = config.data_path(s, "naics_index_xlsx")
@@ -50,6 +54,7 @@ class Context:
         Q.validate_questions(self.questions, s["limits"])
         self.qsha = Q.questions_sha(self.questions)
         self.country_names = {c.alpha2: c.name_en for c in self.countries}
+        self.continent_names = {r["id"]: r["label"] for r in self.prompts.get("continent_options", [])}
 
 
 def out_dir_for(ctx: Context, pdf_path: Path, args) -> Path:
@@ -58,6 +63,25 @@ def out_dir_for(ctx: Context, pdf_path: Path, args) -> Path:
 
 
 # ---------------------------------------------------------------- estimate
+def estimate_tokens(ctx: Context, n_pages: int) -> tuple[float, float, float, float, float]:
+    """-> (질문 토큰, 쪽당 입력, 쪽당 출력, 합계 입력, 합계 출력). 글자 수/chars_per_token 기반 거친 추정."""
+    e = ctx.settings["estimate"]
+    q_tokens = Q.questions_chars(ctx.questions) / e["chars_per_token"]
+    in_per_page = q_tokens + e["pdf_tokens_per_page"]
+    out_per_page = e["output_tokens_per_page"]
+    return q_tokens, in_per_page, out_per_page, in_per_page * n_pages, out_per_page * n_pages
+
+
+def estimate_summary(ctx: Context, n_pages: int) -> str:
+    *_, total_in, total_out = estimate_tokens(ctx, n_pages)
+    p = ctx.settings.get("pricing", {})
+    if p.get("input_per_mtok") or p.get("output_per_mtok"):
+        cost = f"약 ${cost_usd(ctx.settings, int(total_in), int(total_out)):.4f}"
+    else:
+        cost = "계산 불가(settings.pricing 단가 미설정)"
+    return f"입력 약 {total_in:,.0f} tok, 출력 약 {total_out:,.0f} tok, 비용 {cost}"
+
+
 def cmd_estimate(args) -> int:
     ctx = Context(args)
     s = ctx.settings
@@ -65,11 +89,8 @@ def cmd_estimate(args) -> int:
     total = pdf.page_count(pdf_path)
     pages = pdf.parse_pages(args.pages, total)
     e = s["estimate"]
-    q_tokens = Q.questions_chars(ctx.questions) / e["chars_per_token"]
-    in_per_page = q_tokens + e["pdf_tokens_per_page"]
-    out_per_page = e["output_tokens_per_page"]
     n = len(pages)
-    total_in, total_out = in_per_page * n, out_per_page * n
+    q_tokens, in_per_page, out_per_page, total_in, total_out = estimate_tokens(ctx, n)
     print(f"PDF: {pdf_path.name} ({total}쪽 중 {n}쪽)")
     print(f"질문 {len(ctx.questions)}개, 최대 옵션 {max(len(q.options) for q in ctx.questions)}개, "
           f"index 설명 {'사용' if ctx.index else '미사용'}")
@@ -99,6 +120,7 @@ def cmd_run(args) -> int:
         size = len(json.dumps(body, ensure_ascii=False))
         print(f"[dry-run] {pdf_path.name}: {total}쪽 중 {len(pages)}쪽 대상, 질문 {len(ctx.questions)}개")
         print(f"[dry-run] 요청 본문 약 {size:,} 바이트(PDF 제외), questions_sha={ctx.qsha[:12]}")
+        print(f"[dry-run] 예상 ({len(pages)}쪽): {estimate_summary(ctx, len(pages))}")
         print(f"[dry-run] 출력 위치: {out}")
         return 0
 
@@ -119,6 +141,8 @@ def cmd_run(args) -> int:
             return False
         return d.get("pdf_sha256") == pdf_sha and d.get("questions_sha") == ctx.qsha and d.get("status") in ("ok", "blocked")
 
+    totals = {"in": 0, "out": 0, "cost": 0.0, "ok": 0, "billed": False}  # 이번 실행에서 새로 호출한 쪽의 합계
+
     def work(page: int) -> tuple[int, str]:
         pj = pages_dir / f"{page}.json"
         if reusable(pj):
@@ -127,10 +151,11 @@ def cmd_run(args) -> int:
         try:
             b64 = pdf.page_b64(pdf_path, page)
             probs, usage, latency = client.decide(b64, f"page_{page}.pdf", ctx.questions)
+            billed = usage.get("cost")  # 응답의 실제 청구액(크레딧). 없으면 settings.pricing 으로 추정
             rec = {
                 "page": page, "status": "ok", "pdf_sha256": pdf_sha, "questions_sha": ctx.qsha,
                 "probs": probs, "usage": usage,
-                "cost_usd": cost_usd(s, usage["prompt_tokens"], usage["completion_tokens"]),
+                "cost_usd": billed if billed is not None else cost_usd(s, usage["prompt_tokens"], usage["completion_tokens"]),
                 "latency_s": round(latency, 2),
             }
         except ApiError as e:
@@ -142,8 +167,17 @@ def cmd_run(args) -> int:
                 return page, "error"
         write_json_atomic(pj, rec)
         log({k: rec.get(k) for k in ("page", "status", "latency_s", "cost_usd", "usage", "error")})
+        if rec["status"] == "ok":
+            with lock:
+                totals["in"] += rec["usage"]["prompt_tokens"]
+                totals["out"] += rec["usage"]["completion_tokens"]
+                totals["cost"] += rec["cost_usd"]
+                totals["ok"] += 1
+                totals["billed"] = totals["billed"] or rec["usage"].get("cost") is not None
         return page, rec["status"]
 
+    n_call = sum(1 for p in pages if not reusable(pages_dir / f"{p}.json"))
+    print(f"[예상] 호출 {n_call}쪽(재사용 {len(pages) - n_call}쪽): {estimate_summary(ctx, n_call)}")
     workers = args.concurrency or int(s.get("concurrency", 2))
     t0 = time.monotonic()
     statuses: dict[int, str] = {}
@@ -157,7 +191,10 @@ def cmd_run(args) -> int:
     result = build_result(ctx, pdf_path, pdf_sha, total, pages_dir)
     write_json_atomic(out / "__result.json", result)
     write_result_csv(out / "__result.csv", result["doc"])
-    print(f"완료 {time.monotonic() - t0:.1f}s, 결과: {out}/__result.json")
+    src = "응답 usage.cost 합계" if totals["billed"] else "settings.pricing 추정"
+    print(f"[실제] 소요 {time.monotonic() - t0:.1f}s | 토큰 입력 {totals['in']:,} / 출력 {totals['out']:,} "
+          f"(성공 {totals['ok']}쪽) | 비용 ${totals['cost']:.4f} ({src})")
+    print(f"완료, 결과: {out}/__result.json")
     failed = [p for p, st in statuses.items() if st == "error"]
     if failed:
         print(f"[경고] 실패한 쪽: {sorted(failed)}. --resume 으로 다시 실행하세요.", file=sys.stderr)
@@ -179,9 +216,10 @@ def build_result(ctx: Context, pdf_path: Path, pdf_sha: str, total: int, pages_d
             blocked.append(int(d["page"]))
         elif d.get("status") == "ok":
             summaries[int(d["page"])] = aggregate.summarize_page(
-                d["probs"], ctx.naics.items5, ctx.country_names
+                d["probs"], ctx.naics.items5, ctx.country_names, ctx.continent_names
             )
     doc = aggregate.aggregate_document(summaries, ctx.settings["thresholds"])
+    aggregate.attach_region_members(doc, ctx.countries)
     return {
         "pdf": pdf_path.name, "pdf_sha256": pdf_sha, "questions_sha": ctx.qsha, "total_pages": total,
         "pages_done": sorted(summaries), "pages_blocked": sorted(blocked),
@@ -191,7 +229,7 @@ def build_result(ctx: Context, pdf_path: Path, pdf_sha: str, total: int, pages_d
 
 def write_result_csv(path: Path, doc: dict) -> None:
     rows = aggregate.result_rows(doc)
-    with open(path, "w", encoding="utf-8", newline="") as f:
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:  # BOM: 엑셀에서 한글이 깨지지 않게
         w = csv.DictWriter(f, fieldnames=["kind", "code", "name", "score", "evidence_page"])
         w.writeheader()
         w.writerows(rows)

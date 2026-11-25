@@ -15,6 +15,7 @@ from .data import Country, Naics
 
 NONE_ID = "none"
 COUNTRY_QID = "country"
+CONTINENT_QID = "continent"
 NAICS_QID_PREFIX = "naics_"
 
 _STRIP_SUFFIXES = (" manufacturing", " merchant wholesalers", " merchant wholesaler")
@@ -34,14 +35,13 @@ class Question:
     options: list[Option] = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        """Decisions API 질문 객체. 옵션 설명은 criteria[옵션ID] 문자열 하나뿐이라 label 과 description 을 합칩니다."""
         return {
-            "id": self.id,
             "type": "choice",
-            "text": self.text,
-            "options": [
-                {k: v for k, v in (("id", o.id), ("label", o.label), ("description", o.description)) if v}
-                for o in self.options
-            ],
+            "instructions": self.text,
+            "criteria": {
+                o.id: f"{o.label} ({o.description})" if o.description else o.label for o in self.options
+            },
         }
 
 
@@ -101,7 +101,6 @@ def build_questions(
 ) -> list[Question]:
     index_cfg = index_cfg or {}
     use_index = bool(index) and index_cfg.get("enabled", True)
-    none_opt = Option(NONE_ID, prompts["none_label"], prompts.get("none_description"))
     questions: list[Question] = []
     for g4 in sorted(naics.groups4):
         kids = naics.children.get(g4, [])
@@ -117,13 +116,21 @@ def build_questions(
                     index_cfg.get("max_chars", 160),
                     index_cfg.get("priority_terms"),
                 )
-            opts.append(Option(code, naics.items5[code], desc))
-        opts.append(none_opt)
-        text = prompts["naics_question"].format(group_code=g4, group_title=naics.groups4[g4])
+            opts.append(Option(code, naics.titles_ko.get(code) or naics.items5[code], desc))
+        opts.append(Option(NONE_ID, prompts["none_naics"]))
+        title = naics.titles_ko.get(g4) or naics.groups4[g4]
+        text = prompts["naics_question"].format(group_code=g4, group_title=title)
         questions.append(Question(NAICS_QID_PREFIX + g4, text, opts))
 
-    c_opts = [Option(c.alpha2, c.name_en, c.name_ko or None) for c in countries] + [none_opt]
+    c_opts = [Option(c.alpha2, f"{c.name_ko} ({c.name_en})" if c.name_ko else c.name_en) for c in countries]
+    c_opts.append(Option(NONE_ID, prompts["none_country"]))
     questions.append(Question(COUNTRY_QID, prompts["country_question"], c_opts))
+
+    # 마지막 질문: 대륙(지역)
+    r_opts = [Option(r["id"], r["label"]) for r in prompts.get("continent_options", [])]
+    if r_opts:
+        r_opts.append(Option(NONE_ID, prompts["none_continent"]))
+        questions.append(Question(CONTINENT_QID, prompts["continent_question"], r_opts))
     return questions
 
 
@@ -154,8 +161,9 @@ def validate_questions(questions: list[Question], limits: dict) -> None:
         raise QuestionError("; ".join(errors[:20]))
 
 
-def questions_payload(questions: list[Question]) -> list[dict]:
-    return [q.to_dict() for q in questions]
+def questions_payload(questions: list[Question]) -> dict[str, dict]:
+    """요청의 questions 필드: 질문 ID -> 질문 객체."""
+    return {q.id: q.to_dict() for q in questions}
 
 
 def questions_sha(questions: list[Question]) -> str:
