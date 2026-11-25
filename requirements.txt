@@ -3,3 +3,4 @@ PyYAML>=6.0
 requests>=2.31
 pytest>=8.0
 # google-genai>=1.0   # backend=google 또는 icp.backend=google 사용 시
+google-cloud-documentai>=3.0   # ocr 단계(Google Document AI), Apache-2.0

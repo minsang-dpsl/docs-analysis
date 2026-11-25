@@ -68,6 +68,15 @@ page_selection:
   always_front: 2            # 항상 포함할 앞쪽 수(제품 정의)
   country_page_min_score: 0.2
 
+# OCR 단계(Google Document AI): 결과 CSV 에서 NAICS 코드가 많이 몰린 쪽 상위 N개만 텍스트 추출
+# 인증/프로젝트/프로세서는 환경 변수(.env): GOOGLE_APPLICATION_CREDENTIALS, DOCUMENTAI_PROJECT_ID,
+# DOCUMENTAI_PROCESSOR_ID, DOCUMENTAI_LOCATION(기본 us)
+ocr:
+  top_pages: 5
+  price_per_1000_pages: 1.5          # [PLACEHOLDER] Enterprise Document OCR, 2차 출처 확인. 공식 가격 페이지로 재확인
+  max_pages_per_request: 15          # 온라인 처리 시스템 한도(변경 불가). 넘으면 쪽별 요청
+  max_bytes_per_request: 35000000    # 온라인 40MB 한도에 여유를 둔 값
+
 # ICP 추출 단계
 icp:
   backend: openrouter

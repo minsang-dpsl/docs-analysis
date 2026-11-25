@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import aggregate, config, data, pdf, questions as Q
+from . import aggregate, config, data, ocr as ocr_mod, pdf, questions as Q
 from .client import ApiError, DecisionClient
 from .icp import run_icp
 from .select_pages import select_pages
@@ -274,6 +274,61 @@ def cmd_icp(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- ocr
+def cmd_ocr(args) -> int:
+    """결과 CSV 의 NAICS 코드가 많이 몰린 쪽 상위 N개만 Document AI 로 텍스트 추출."""
+    settings = config.load_settings()
+    cfg = settings["ocr"]
+    pdf_path = Path(args.pdf)
+    out = config.output_dir(settings, pdf_path, Path(args.out) if getattr(args, "out", None) else None)
+    csv_path = Path(args.result) if getattr(args, "result", None) else out / "__result.csv"
+    if not csv_path.exists():
+        raise SystemExit(f"결과 CSV 가 없습니다: {csv_path} (먼저 run 을 실행하세요)")
+    total = pdf.page_count(pdf_path)
+    top_n = args.top or int(cfg["top_pages"])
+    sel = ocr_mod.select_ocr_pages(ocr_mod.read_naics_rows(csv_path), top_n)
+    pages, stats = sel["pages"], sel["stats"]
+    if not pages:
+        print("[오류] 결과 CSV 에 NAICS 행이 없어 선택할 쪽이 없습니다.", file=sys.stderr)
+        return 1
+    if max(pages) > total:
+        raise SystemExit(f"evidence_page {max(pages)} 가 PDF 쪽수({total})를 넘습니다. 다른 PDF 의 결과 CSV 가 아닌지 확인하세요.")
+
+    print(f"[선택] NAICS 코드가 많이 몰린 쪽 상위 {top_n} (NAICS가 나온 {len(stats)}쪽 중 {len(pages)}쪽 사용)")
+    for rank, p in enumerate(pages, 1):
+        print(f"  {rank}위 쪽 {p}: 코드 {stats[p]['n']}개, score 합 {stats[p]['sum']:.4f}")
+    price = float(cfg["price_per_1000_pages"])
+    print(f"[예상] Document AI {len(pages)}쪽: 비용 약 ${len(pages) / 1000 * price:.4f} (단가 ${price}/1,000쪽, 미확정)")
+    if args.dry_run:
+        print("[dry-run] Document AI 를 호출하지 않았습니다.")
+        return 0
+
+    process = ocr_mod.make_process()
+    t0 = time.monotonic()
+    texts, n_requests = ocr_mod.extract_text(
+        pdf_path, pages, process, int(cfg["max_pages_per_request"]), int(cfg["max_bytes_per_request"])
+    )
+    elapsed = time.monotonic() - t0
+    chars = {p: len(texts[p]) for p in pages}
+    rec = {
+        "pdf": pdf_path.name, "pdf_sha256": pdf.sha256_file(pdf_path), "source_csv": csv_path.name, "top_n": top_n,
+        "selected": [{"rank": i, "page": p, "naics_count": stats[p]["n"], "score_sum": stats[p]["sum"],
+                      "naics_codes": stats[p]["codes"]} for i, p in enumerate(pages, 1)],
+        "ocr": {"requests": n_requests, "pages_sent": len(pages), "chars": sum(chars.values()),
+                "latency_s": round(elapsed, 2)},
+        "pages": {str(p): texts[p] for p in sorted(pages)},
+    }
+    write_json_atomic(out / "__ocr.json", rec)
+    (out / "__ocr.txt").write_text(ocr_mod.combine_pages_text(texts), encoding="utf-8")  # 쪽 구분선이 있는 txt 하나
+    print(f"[실제] 소요 {elapsed:.1f}s | 요청 {n_requests}회 | {len(pages)}쪽, 글자 {sum(chars.values()):,}자 "
+          f"(쪽별 {', '.join(f'{p}쪽 {chars[p]:,}' for p in sorted(pages))})")
+    empty = [p for p in pages if not texts[p].strip()]
+    if empty:
+        print(f"[경고] 텍스트가 비어 있는 쪽: {empty}", file=sys.stderr)
+    print(f"완료, 결과: {out}/__ocr.txt (메타데이터: {out}/__ocr.json)")
+    return 0
+
+
 # ---------------------------------------------------------------- main
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python -m app", description="영업자료 PDF NAICS/국가 추출 및 ICP 생성")
@@ -306,6 +361,13 @@ def build_parser() -> argparse.ArgumentParser:
     common(i)
     i.add_argument("--result")
     i.set_defaults(fn=cmd_icp)
+
+    o = sub.add_parser("ocr", help="결과 CSV 의 NAICS 가 많이 몰린 쪽 상위 N개만 Document AI 로 텍스트 추출")
+    common(o)
+    o.add_argument("--result", help="__result.csv 경로(기본: 출력 폴더)")
+    o.add_argument("--top", type=int, help="사용할 쪽 수(기본 settings.ocr.top_pages)")
+    o.add_argument("--dry-run", action="store_true", help="Document AI 호출 없이 선택된 쪽과 예상 비용만 출력")
+    o.set_defaults(fn=cmd_ocr)
     return ap
 
 
@@ -313,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.fn(args)
-    except (data.CountMismatch, Q.QuestionError) as e:
+    except (data.CountMismatch, Q.QuestionError, ocr_mod.OcrError, RuntimeError) as e:  # RuntimeError: 환경 변수/키 누락
         print(f"[오류] {e}", file=sys.stderr)
         return 2
 
